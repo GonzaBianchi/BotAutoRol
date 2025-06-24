@@ -25,7 +25,7 @@ app.listen(PORT, () => {
   console.log(`Express escuchando en el puerto ${PORT}`);
 });
 
-// Configuración del cliente de Discord
+// Configuración del cliente de Discord con todos los intents necesarios
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -33,7 +33,14 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessageReactions,
-  ]
+    GatewayIntentBits.GuildEmojisAndStickers // Agregado para mejor manejo de emojis custom
+  ],
+  // Configuraciones adicionales para mejorar la estabilidad
+  partials: ['MESSAGE', 'CHANNEL', 'REACTION'],
+  allowedMentions: {
+    parse: ['users', 'roles'],
+    repliedUser: false
+  }
 });
 
 // Conectar a MongoDB Atlas
@@ -101,6 +108,15 @@ async function registerSlashCommands() {
     console.error('Error registrando comandos slash:', error);
   }
 }
+
+// Manejo de errores no capturados
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
 
 registerSlashCommands();
 

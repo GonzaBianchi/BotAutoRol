@@ -5,6 +5,8 @@ import RoleMenu from '../models/RoleMenu.js';
 const reactionCleanupTimeouts = new Map();
 // Map para evitar procesamiento duplicado
 const processingUsers = new Set();
+// Map para trackear el último emoji seleccionado por usuario
+const userLastEmoji = new Map();
 
 export default function setupRoleMenuReactions(client) {
   // Añadir rol al reaccionar
@@ -59,28 +61,23 @@ export default function setupRoleMenuReactions(client) {
       
       console.log(`🔄 Procesando reacción ${emojiStr} para ${member.displayName}`);
       
+      // Trackear el último emoji del usuario
+      const userKey = `${user.id}-${reaction.message.id}`;
+      const lastEmoji = userLastEmoji.get(userKey);
+      userLastEmoji.set(userKey, emojiStr);
+      
       // Para rolemenu tipo 'simple', limpiar primero otros roles y reacciones
       if (roleMenu.type === 'simple') {
+        // Cancelar cualquier timeout anterior
         const timeoutKey = `${user.id}-${reaction.message.id}`;
-        
-        // Cancelar timeout anterior si existe
         if (reactionCleanupTimeouts.has(timeoutKey)) {
           clearTimeout(reactionCleanupTimeouts.get(timeoutKey));
           reactionCleanupTimeouts.delete(timeoutKey);
         }
         
-        // Programar limpieza con un pequeño delay para asegurar que Discord procese la reacción
-        const timeoutId = setTimeout(async () => {
-          try {
-            await cleanupOtherReactions(reaction.message, user, roleMenu, roleData.emoji, member);
-            reactionCleanupTimeouts.delete(timeoutKey);
-          } catch (error) {
-            console.error('❌ Error en limpieza programada:', error);
-            reactionCleanupTimeouts.delete(timeoutKey);
-          }
-        }, 500); // Aumentado el delay
-        
-        reactionCleanupTimeouts.set(timeoutKey, timeoutId);
+        // Limpiar inmediatamente en paralelo
+        cleanupOtherReactions(reaction.message, user, roleMenu, emojiStr, member)
+          .catch(error => console.error('❌ Error en limpieza:', error));
       }
       
       // Asignar el nuevo rol
@@ -98,10 +95,10 @@ export default function setupRoleMenuReactions(client) {
     } catch (error) {
       console.error('❌ Error general en MessageReactionAdd:', error);
     } finally {
-      // Limpiar el flag de procesamiento después de un delay
+      // Limpiar el flag de procesamiento después de un delay más corto
       setTimeout(() => {
         processingUsers.delete(processingKey);
-      }, 1000);
+      }, 500);
     }
   });
 
@@ -144,23 +141,22 @@ async function cleanupOtherReactions(message, user, roleMenu, currentEmoji, memb
   try {
     console.log(`🧹 Iniciando limpieza para ${member.displayName}, emoji actual: ${currentEmoji}`);
     
-    // Re-fetch del mensaje con retry logic
+    // Pequeño delay para asegurar que Discord procese la reacción actual
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Re-fetch del mensaje
     let freshMessage;
     try {
-      freshMessage = await message.fetch(true); // Force fetch from API
+      freshMessage = await message.fetch(true);
     } catch (error) {
       console.error('❌ Error fetching message:', error);
       return;
     }
     
-    // Crear un array de promesas para manejar las operaciones de forma secuencial
-    const cleanupOperations = [];
-    
-    // Procesar cada rol del menú
-    for (const roleConfig of roleMenu.roles) {
-      if (roleConfig.emoji === currentEmoji) continue; // Saltar el emoji actual
-      
-      cleanupOperations.push(async () => {
+    // Procesar cada rol del menú en paralelo para mayor eficiencia
+    const cleanupPromises = roleMenu.roles
+      .filter(roleConfig => roleConfig.emoji !== currentEmoji)
+      .map(async (roleConfig) => {
         try {
           // Remover rol si el usuario lo tiene
           const role = member.guild.roles.cache.get(roleConfig.roleId);
@@ -178,70 +174,69 @@ async function cleanupOtherReactions(message, user, roleMenu, currentEmoji, memb
           });
           
           if (targetReaction) {
-            // Verificar si el usuario realmente tiene esta reacción
-            const hasReaction = targetReaction.users.cache.has(user.id);
-            if (hasReaction) {
-              try {
-                await targetReaction.users.remove(user.id);
-                console.log(`🧹 Reacción ${roleConfig.emoji} removida de ${member.displayName}`);
-              } catch (reactionError) {
-                // Intentar método alternativo si falla
-                if (reactionError.code === 10008) { // Unknown Message
-                  console.log(`⚠️ Mensaje no encontrado, saltando reacción ${roleConfig.emoji}`);
-                } else if (reactionError.code === 50013) { // Missing Permissions
-                  console.log(`⚠️ Sin permisos para remover reacción ${roleConfig.emoji}`);
-                } else {
-                  console.error(`❌ Error removiendo reacción ${roleConfig.emoji}:`, reactionError.message);
-                  
-                  // Método alternativo: fetch usuarios de la reacción y remover
-                  try {
-                    const users = await targetReaction.users.fetch();
-                    if (users.has(user.id)) {
-                      await targetReaction.users.remove(user.id);
-                      console.log(`🧹 Reacción ${roleConfig.emoji} removida (método alternativo)`);
-                    }
-                  } catch (altError) {
-                    console.error(`❌ Método alternativo también falló:`, altError.message);
-                  }
-                }
-              }
-            } else {
-              console.log(`ℹ️ Usuario no tiene reacción ${roleConfig.emoji}, saltando...`);
-            }
-          } else {
-            console.log(`ℹ️ Reacción ${roleConfig.emoji} no encontrada en mensaje`);
+            await removeUserReaction(targetReaction, user, roleConfig.emoji);
           }
           
         } catch (error) {
           console.error(`❌ Error limpiando ${roleConfig.emoji}:`, error.message);
-          // Continuar con el siguiente rol aunque uno falle
         }
       });
-    }
     
-    // Ejecutar operaciones de limpieza secuencialmente con delays
-    for (let i = 0; i < cleanupOperations.length; i++) {
-      try {
-        await cleanupOperations[i]();
-        // Refrescar la caché de usuarios de la reacción después de cada limpieza
-        if (i < cleanupOperations.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 300)); // Aumenta el delay para robustez
-        }
-      } catch (error) {
-        console.error(`❌ Error en operación de limpieza ${i}:`, error);
-      }
-    }
-    // Forzar actualización de caché de reacciones para asegurar limpieza
-    try {
-      await freshMessage.reactions.cache.each(async r => {
-        await r.users.fetch();
-      });
-    } catch (e) {
-      console.log('ℹ️ No se pudo refrescar la caché de usuarios de reacciones:', e.message);
-    }
+    // Esperar a que todas las operaciones terminen
+    await Promise.allSettled(cleanupPromises);
+    
     console.log(`✅ Limpieza completada para ${member.displayName}`);
     
   } catch (error) {
     console.error('❌ Error en cleanupOtherReactions:', error.message);
   }
+}
+
+// Función auxiliar para remover reacciones de usuario con múltiples intentos
+async function removeUserReaction(reaction, user, emojiStr) {
+  const maxRetries = 3;
+  let retries = 0;
+  
+  while (retries < maxRetries) {
+    try {
+      // Verificar si el usuario tiene la reacción
+      const users = await reaction.users.fetch();
+      if (!users.has(user.id)) {
+        console.log(`ℹ️ Usuario no tiene reacción ${emojiStr}, saltando...`);
+        return;
+      }
+      
+      // Intentar remover la reacción
+      await reaction.users.remove(user.id);
+      console.log(`🧹 Reacción ${emojiStr} removida exitosamente`);
+      return;
+      
+    } catch (error) {
+      retries++;
+      console.log(`⚠️ Intento ${retries}/${maxRetries} fallido para ${emojiStr}:`, error.message);
+      
+      // Manejar errores específicos
+      if (error.code === 10008) { // Unknown Message
+        console.log(`❌ Mensaje no encontrado, abortando ${emojiStr}`);
+        return;
+      }
+      
+      if (error.code === 50013) { // Missing Permissions
+        console.log(`❌ Sin permisos para remover reacción ${emojiStr}`);
+        return;
+      }
+      
+      if (error.code === 10014) { // Unknown Emoji
+        console.log(`❌ Emoji desconocido ${emojiStr}`);
+        return;
+      }
+      
+      // Si no es el último intento, esperar antes de reintentar
+      if (retries < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 200 * retries));
+      }
+    }
+  }
+  
+  console.error(`❌ No se pudo remover reacción ${emojiStr} después de ${maxRetries} intentos`);
 }
