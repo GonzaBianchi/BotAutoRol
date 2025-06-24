@@ -22,21 +22,27 @@ export default function setupRoleMenuReactions(client) {
         : reaction.emoji.name;
       
       const roleData = roleMenu.roles.find(r => r.emoji === emojiStr);
-      if (!roleData) return;
-      
-      // Asignar el nuevo rol primero
-      try {
-        const role = member.guild.roles.cache.get(roleData.roleId);
-        if (role && !member.roles.cache.has(roleData.roleId)) {
-          await member.roles.add(roleData.roleId);
-          console.log(`✅ Rol ${role.name} asignado a ${member.displayName}`);
-        }
-      } catch (error) {
-        console.error(`❌ Error asignando rol ${roleData.roleId}:`, error);
-        return; // Si no se puede asignar el rol, no continuar
+      if (!roleData) {
+        console.log('❌ Emoji no encontrado en rolemenu:', emojiStr);
+        return;
       }
       
-      // Solo limpiar reacciones si es tipo 'simple'
+      const role = member.guild.roles.cache.get(roleData.roleId);
+      if (!role) {
+        console.log('❌ Rol no encontrado:', roleData.roleId);
+        return;
+      }
+      
+      // Verificaciones básicas de permisos solo si es necesario
+      const botMember = await reaction.message.guild.members.fetchMe();
+      if (!botMember.permissions.has('ManageRoles') || role.position >= botMember.roles.highest.position) {
+        console.log('❌ Sin permisos para gestionar el rol:', role.name);
+        return;
+      }
+      
+      console.log(`🔄 Procesando reacción ${emojiStr} para ${member.displayName}`);
+      
+      // Para rolemenu tipo 'simple', limpiar primero otros roles y reacciones
       if (roleMenu.type === 'simple') {
         const timeoutKey = `${user.id}-${reaction.message.id}`;
         
@@ -45,22 +51,37 @@ export default function setupRoleMenuReactions(client) {
           clearTimeout(reactionCleanupTimeouts.get(timeoutKey));
         }
         
-        // Programar limpieza con debounce
+        // Limpiar inmediatamente otros roles y reacciones
+        await cleanupOtherReactions(reaction.message, user, roleMenu, roleData.emoji, member);
+        
+        // Programar una segunda limpieza por si acaso
         const timeoutId = setTimeout(async () => {
           try {
-            await cleanupOtherReactions(reaction.message, user, roleMenu, roleData.emoji);
+            await cleanupOtherReactions(reaction.message, user, roleMenu, roleData.emoji, member);
             reactionCleanupTimeouts.delete(timeoutKey);
           } catch (error) {
-            console.error('❌ Error en limpieza de reacciones:', error);
+            console.error('❌ Error en segunda limpieza:', error);
             reactionCleanupTimeouts.delete(timeoutKey);
           }
-        }, 150); // 150ms de delay para permitir que Discord procese la reacción
+        }, 200);
         
         reactionCleanupTimeouts.set(timeoutKey, timeoutId);
       }
       
+      // Asignar el nuevo rol
+      try {
+        if (!member.roles.cache.has(roleData.roleId)) {
+          await member.roles.add(roleData.roleId);
+          console.log(`✅ Rol ${role.name} asignado a ${member.displayName}`);
+        } else {
+          console.log(`ℹ️ ${member.displayName} ya tiene el rol ${role.name}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error asignando rol ${role.name}:`, error);
+      }
+      
     } catch (error) {
-      console.error('❌ Error en MessageReactionAdd:', error);
+      console.error('❌ Error general en MessageReactionAdd:', error);
     }
   });
 
@@ -99,11 +120,12 @@ export default function setupRoleMenuReactions(client) {
 }
 
 // Función auxiliar para limpiar otras reacciones en modo 'simple'
-async function cleanupOtherReactions(message, user, roleMenu, currentEmoji) {
+async function cleanupOtherReactions(message, user, roleMenu, currentEmoji, member) {
   try {
+    console.log(`🧹 Iniciando limpieza para ${member.displayName}, emoji actual: ${currentEmoji}`);
+    
     // Re-fetch del mensaje para obtener reacciones actualizadas
     const freshMessage = await message.fetch();
-    const member = await message.guild.members.fetch(user.id);
     
     // Procesar cada rol del menú
     for (const roleConfig of roleMenu.roles) {
@@ -114,7 +136,7 @@ async function cleanupOtherReactions(message, user, roleMenu, currentEmoji) {
         const role = member.guild.roles.cache.get(roleConfig.roleId);
         if (role && member.roles.cache.has(roleConfig.roleId)) {
           await member.roles.remove(roleConfig.roleId);
-          console.log(`🧹 Rol ${role.name} limpiado de ${member.displayName}`);
+          console.log(`🧹 Rol ${role.name} removido de ${member.displayName}`);
         }
         
         // Buscar y remover la reacción correspondiente
@@ -127,16 +149,21 @@ async function cleanupOtherReactions(message, user, roleMenu, currentEmoji) {
         
         if (targetReaction && targetReaction.users.cache.has(user.id)) {
           await targetReaction.users.remove(user.id);
-          console.log(`🧹 Reacción ${roleConfig.emoji} limpiada de ${member.displayName}`);
+          console.log(`🧹 Reacción ${roleConfig.emoji} removida de ${member.displayName}`);
         }
         
+        // Pequeño delay entre operaciones para evitar rate limits
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
       } catch (error) {
-        console.error(`❌ Error limpiando ${roleConfig.emoji} para usuario ${user.id}:`, error);
+        console.error(`❌ Error limpiando ${roleConfig.emoji}:`, error.message);
         // Continuar con el siguiente rol aunque uno falle
       }
     }
     
+    console.log(`✅ Limpieza completada para ${member.displayName}`);
+    
   } catch (error) {
-    console.error('❌ Error en cleanupOtherReactions:', error);
+    console.error('❌ Error en cleanupOtherReactions:', error.message);
   }
 }
