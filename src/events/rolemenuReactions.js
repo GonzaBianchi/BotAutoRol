@@ -223,15 +223,22 @@ async function cleanupOtherReactions(message, user, roleMenu, currentEmoji, memb
     for (let i = 0; i < cleanupOperations.length; i++) {
       try {
         await cleanupOperations[i]();
-        // Delay entre operaciones para evitar rate limits
+        // Refrescar la caché de usuarios de la reacción después de cada limpieza
         if (i < cleanupOperations.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise(resolve => setTimeout(resolve, 300)); // Aumenta el delay para robustez
         }
       } catch (error) {
         console.error(`❌ Error en operación de limpieza ${i}:`, error);
       }
     }
-    
+    // Forzar actualización de caché de reacciones para asegurar limpieza
+    try {
+      await freshMessage.reactions.cache.each(async r => {
+        await r.users.fetch();
+      });
+    } catch (e) {
+      console.log('ℹ️ No se pudo refrescar la caché de usuarios de reacciones:', e.message);
+    }
     console.log(`✅ Limpieza completada para ${member.displayName}`);
     
   } catch (error) {
