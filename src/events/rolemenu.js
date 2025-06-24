@@ -3,6 +3,36 @@ import RoleMenu from '../models/RoleMenu.js';
 
 // Estado temporal en memoria (puedes migrar a MongoDB si quieres persistencia entre reinicios)
 const roleMenuSessions = new Map();
+const ROLES_PER_PAGE = 25;
+
+function getRoleOptions(roles, page, selected = []) {
+  const start = page * ROLES_PER_PAGE;
+  const pageRoles = roles.slice(start, start + ROLES_PER_PAGE);
+  return pageRoles.map(r => ({
+    label: r.name,
+    value: r.id,
+    default: selected.includes(r.id)
+  }));
+}
+
+function getPaginationRow(page, maxPage) {
+  return new ActionRowBuilder().addComponents(
+    [
+      ...(page > 0 ? [
+        new StringSelectMenuBuilder()
+          .setCustomId('rolemenu_roles_prev')
+          .setPlaceholder('Anterior')
+          .addOptions([{ label: 'Anterior', value: 'prev' }])
+      ] : []),
+      ...(page < maxPage ? [
+        new StringSelectMenuBuilder()
+          .setCustomId('rolemenu_roles_next')
+          .setPlaceholder('Siguiente')
+          .addOptions([{ label: 'Siguiente', value: 'next' }])
+      ] : [])
+    ]
+  );
+}
 
 export default function setupRoleMenuEvents(client) {
   // Eliminar listeners innecesarios y limpiar el flujo
@@ -32,8 +62,16 @@ export default function setupRoleMenuEvents(client) {
     const session = roleMenuSessions.get(interaction.user.id);
     if (!session) return interaction.reply({ content: 'Sesión no encontrada.', ephemeral: true });
     session.tipo = tipo;
-    const roles = interaction.guild.roles.cache.filter(r => r.editable && !r.managed && r.id !== interaction.guild.id);
-    const options = roles.map(r => ({ label: r.name, value: r.id })).slice(0, 20);
+    // Mostrar select menu de roles (mostrar todos los roles excepto @everyone y gestionados)
+    const rolesArr = interaction.guild.roles.cache
+      .filter(r => r.id !== interaction.guild.id && !r.managed)
+      .sort((a, b) => b.position - a.position)
+      .map(r => r);
+    session.rolesArr = rolesArr;
+    session.rolesPage = 0;
+    session.selectedRoles = [];
+    const maxPage = Math.max(0, Math.ceil(rolesArr.length / ROLES_PER_PAGE) - 1);
+    const options = getRoleOptions(rolesArr, 0);
     if (!options.length) return interaction.reply({ content: 'No hay roles disponibles para seleccionar.', ephemeral: true });
     const row = new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
@@ -43,7 +81,9 @@ export default function setupRoleMenuEvents(client) {
         .setMaxValues(Math.min(20, options.length))
         .addOptions(options)
     );
-    await interaction.reply({ content: 'Selecciona los roles que formarán parte del rolemenu:', components: [row], ephemeral: true });
+    const components = [row];
+    if (maxPage > 0) components.push(getPaginationRow(0, maxPage));
+    await interaction.reply({ content: 'Selecciona los roles que formarán parte del rolemenu:', components, ephemeral: true });
   });
 
   // Select menu para elegir roles (multi-select)
@@ -52,13 +92,40 @@ export default function setupRoleMenuEvents(client) {
     if (interaction.customId !== 'rolemenu_roles_select') return;
     const session = roleMenuSessions.get(interaction.user.id);
     if (!session) return interaction.reply({ content: 'Sesión no encontrada.', ephemeral: true });
-    session.selectedRoles = interaction.values; // array de IDs
+    // Guardar selección acumulada
+    session.selectedRoles = Array.from(new Set([...(session.selectedRoles || []), ...interaction.values]));
     session.roleIndex = 0;
     session.roles = [];
-    // Responder a la interacción para evitar el error de Discord
-    await interaction.reply({ content: 'Configurando roles seleccionados...', ephemeral: true });
+    // Solo responder si la interacción NO ha sido respondida
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({ content: 'Configurando roles seleccionados...', ephemeral: true });
+    }
     // Iniciar flujo de mensajes y reacciones
     await pedirDatosRol(interaction, session);
+  });
+
+  // Paginación siguiente/anterior
+  client.on(Events.InteractionCreate, async interaction => {
+    if (!interaction.isStringSelectMenu()) return;
+    if (interaction.customId !== 'rolemenu_roles_next' && interaction.customId !== 'rolemenu_roles_prev') return;
+    const session = roleMenuSessions.get(interaction.user.id);
+    if (!session) return interaction.reply({ content: 'Sesión no encontrada.', ephemeral: true });
+    const maxPage = Math.max(0, Math.ceil(session.rolesArr.length / ROLES_PER_PAGE) - 1);
+    if (interaction.customId === 'rolemenu_roles_next') session.rolesPage = Math.min(maxPage, session.rolesPage + 1);
+    if (interaction.customId === 'rolemenu_roles_prev') session.rolesPage = Math.max(0, session.rolesPage - 1);
+    const options = getRoleOptions(session.rolesArr, session.rolesPage, session.selectedRoles);
+    const row = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId('rolemenu_roles_select')
+        .setPlaceholder('Selecciona los roles para el rolemenu (máx 20)')
+        .setMinValues(1)
+        .setMaxValues(Math.min(20, options.length))
+        .addOptions(options)
+    );
+    const components = [row];
+    if (maxPage > 0) components.push(getPaginationRow(session.rolesPage, maxPage));
+    // Usar update para actualizar el mensaje del select
+    await interaction.update({ content: 'Selecciona los roles que formarán parte del rolemenu:', components });
   });
 
   // Handler para el select menu de emojis custom
